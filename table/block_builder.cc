@@ -78,6 +78,7 @@ void BlockBuilder::Add(const Slice& key, const Slice& value) {
          || options_->comparator->Compare(key, last_key_piece) > 0);
   size_t shared = 0;
   if (counter_ < options_->block_restart_interval) {
+    // 与上一key的比较??
     // See how much sharing to do with previous string
     const size_t min_length = std::min(last_key_piece.size(), key.size());
     while ((shared < min_length) && (last_key_piece[shared] == key[shared])) {
@@ -102,6 +103,7 @@ void BlockBuilder::Add(const Slice& key, const Slice& value) {
   // Update state
   last_key_.resize(shared);
   last_key_.append(key.data() + shared, non_shared);
+  // 上面两句其实等效于last_key_=key.ToString()，但是像上面那样写可以使内存copy最小化
   assert(Slice(last_key_) == key);
   counter_++;
 }

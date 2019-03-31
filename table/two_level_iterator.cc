@@ -171,6 +171,7 @@ void TwoLevelIterator::InitDataBlock() {
 
 }  // namespace
 
+// 两层迭代，第一层索引，第二层数据
 Iterator* NewTwoLevelIterator(
     Iterator* index_iter,
     BlockFunction block_function,

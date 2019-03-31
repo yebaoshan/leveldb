@@ -20,6 +20,7 @@ Arena::~Arena() {
 }
 
 char* Arena::AllocateFallback(size_t bytes) {
+  // >1k 直接申请返回
   if (bytes > kBlockSize / 4) {
     // Object is more than a quarter of our block size.  Allocate it separately
     // to avoid wasting too much space in leftover bytes.
@@ -27,6 +28,7 @@ char* Arena::AllocateFallback(size_t bytes) {
     return result;
   }
 
+  // 小于1K的请求，则申请一个新的4k内存块，从中分配一部分给用户
   // We waste the remaining space in the current block.
   alloc_ptr_ = AllocateNewBlock(kBlockSize);
   alloc_bytes_remaining_ = kBlockSize;
@@ -40,6 +42,7 @@ char* Arena::AllocateFallback(size_t bytes) {
 char* Arena::AllocateAligned(size_t bytes) {
   const int align = (sizeof(void*) > 8) ? sizeof(void*) : 8;
   assert((align & (align-1)) == 0);   // Pointer size should be a power of 2
+  // 对齐alloc_ptr_, & 相当于求余
   size_t current_mod = reinterpret_cast<uintptr_t>(alloc_ptr_) & (align-1);
   size_t slop = (current_mod == 0 ? 0 : align - current_mod);
   size_t needed = bytes + slop;
@@ -59,6 +62,7 @@ char* Arena::AllocateAligned(size_t bytes) {
 char* Arena::AllocateNewBlock(size_t block_bytes) {
   char* result = new char[block_bytes];
   blocks_.push_back(result);
+  // sizeof(char*) 为blocks保存值char*的大小
   memory_usage_.fetch_add(block_bytes + sizeof(char*),
                           std::memory_order_relaxed);
   return result;

@@ -16,6 +16,8 @@ class Random {
  private:
   uint32_t seed_;
  public:
+  //C语言中伪随机数生成算法实际上是采用了"线性同余法"。具体的计算如下：
+  //seed = (seed * A + C ) % M
   explicit Random(uint32_t s) : seed_(s & 0x7fffffffu) {
     // Avoid bad seeds.
     if (seed_ == 0 || seed_ == 2147483647L) {
@@ -24,6 +26,7 @@ class Random {
   }
   uint32_t Next() {
     static const uint32_t M = 2147483647L;   // 2^31-1
+    // A=7^5
     static const uint64_t A = 16807;  // bits 14, 8, 7, 5, 2, 1, 0
     // We are computing
     //       seed_ = (seed_ * A) % M,    where M = 2^31-1

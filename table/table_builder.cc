@@ -39,7 +39,7 @@ struct TableBuilder::Rep {
   // blocks.
   //
   // Invariant: r->pending_index_entry is true only if data_block is empty.
-  bool pending_index_entry;
+  bool pending_index_entry;    // 当一个Data Block被写入到.sst文件时，为true
   BlockHandle pending_handle;  // Handle to add to index block
 
   std::string compressed_output;
@@ -94,6 +94,7 @@ void TableBuilder::Add(const Slice& key, const Slice& value) {
   assert(!r->closed);
   if (!ok()) return;
   if (r->num_entries > 0) {
+    // 加入的key一定比上一次加入的key大
     assert(r->options.comparator->Compare(key, Slice(r->last_key)) > 0);
   }
 
@@ -102,6 +103,7 @@ void TableBuilder::Add(const Slice& key, const Slice& value) {
     r->options.comparator->FindShortestSeparator(&r->last_key, key);
     std::string handle_encoding;
     r->pending_handle.EncodeTo(&handle_encoding);
+    // 将上一Data Block的偏移和大小作为value存放到index_block中
     r->index_block.Add(r->last_key, Slice(handle_encoding));
     r->pending_index_entry = false;
   }
@@ -115,6 +117,7 @@ void TableBuilder::Add(const Slice& key, const Slice& value) {
   r->data_block.Add(key, value);
 
   const size_t estimated_block_size = r->data_block.CurrentSizeEstimate();
+  // Data Block的block_data字段大小满足要求，准备写入磁盘
   if (estimated_block_size >= r->options.block_size) {
     Flush();
   }
@@ -128,6 +131,7 @@ void TableBuilder::Flush() {
   assert(!r->pending_index_entry);
   WriteBlock(&r->data_block, &r->pending_handle);
   if (ok()) {
+    // 置位索引开关
     r->pending_index_entry = true;
     r->status = r->file->Flush();
   }
@@ -148,6 +152,7 @@ void TableBuilder::WriteBlock(BlockBuilder* block, BlockHandle* handle) {
   Slice block_contents;
   CompressionType type = r->options.compression;
   // TODO(postrelease): Support more compression options: zlib?
+  // 根据指定压缩算法，进行压缩数据
   switch (type) {
     case kNoCompression:
       block_contents = raw;
@@ -180,6 +185,8 @@ void TableBuilder::WriteRawBlock(const Slice& block_contents,
   handle->set_size(block_contents.size());
   r->status = r->file->Append(block_contents);
   if (r->status.ok()) {
+    // 1-byte type + 32-bit crc
+    // 写入压缩类型和crc
     char trailer[kBlockTrailerSize];
     trailer[0] = type;
     uint32_t crc = crc32c::Value(block_contents.data(), block_contents.size());
@@ -198,6 +205,7 @@ Status TableBuilder::status() const {
 
 Status TableBuilder::Finish() {
   Rep* r = rep_;
+  // 将剩余的block_data部分写入磁盘
   Flush();
   assert(!r->closed);
   r->closed = true;

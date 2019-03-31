@@ -17,7 +17,7 @@
 namespace leveldb {
 
 class Env;
-
+// table cache缓存的是table文件
 class TableCache {
  public:
   TableCache(const std::string& dbname, const Options& options, int entries);

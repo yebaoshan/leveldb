@@ -44,6 +44,9 @@ void PutFixed64(std::string* dst, uint64_t value) {
   dst->append(buf, sizeof(buf));
 }
 
+// 整数转化为字符保存
+// Varint中的每个byte的最高位bit有特殊的含义，如果该位为 1，表示后续的byte也是该数字的一部分，
+// 如果该位为0，则结束。其他的7 个bit都用来表示数字
 char* EncodeVarint32(char* dst, uint32_t v) {
   // Operate on characters as unsigneds
   unsigned char* ptr = reinterpret_cast<unsigned char*>(dst);

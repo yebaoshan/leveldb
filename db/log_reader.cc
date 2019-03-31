@@ -37,6 +37,8 @@ bool Reader::SkipToInitialBlock() {
   const size_t offset_in_block = initial_offset_ % kBlockSize;
   uint64_t block_start_location = initial_offset_ - offset_in_block;
 
+  // offset_in_block > kBlockSize - 6，说明已经到了一个Block的尾部，
+  // 尾部填充的是6个空字符。此时只能定位到下一个Block的开头。
   // Don't search a block if we'd be in the trailer
   if (offset_in_block > kBlockSize - 6) {
     block_start_location += kBlockSize;
@@ -65,9 +67,11 @@ bool Reader::ReadRecord(Slice* record, std::string* scratch) {
 
   scratch->clear();
   record->clear();
+  // 是否是分段的记录
   bool in_fragmented_record = false;
   // Record offset of the logical record that we're reading
   // 0 is a dummy value to make compilers happy
+  // 当前读取的记录的逻辑偏移
   uint64_t prospective_record_offset = 0;
 
   Slice fragment;
@@ -197,6 +201,7 @@ unsigned int Reader::ReadPhysicalRecord(Slice* result) {
       if (!eof_) {
         // Last read was a full read, so this is a trailer to skip
         buffer_.clear();
+        // 每次读取一个blocksize，即32k
         Status status = file_->Read(kBlockSize, &buffer_, backing_store_);
         end_of_buffer_offset_ += buffer_.size();
         if (!status.ok()) {

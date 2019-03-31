@@ -27,7 +27,7 @@ struct Table::Rep {
   Options options;
   Status status;
   RandomAccessFile* file;
-  uint64_t cache_id;
+  uint64_t cache_id;  //block cache的ID，用于组建block cache结点的key
   FilterBlockReader* filter;
   const char* filter_data;
 
@@ -172,6 +172,7 @@ Iterator* Table::BlockReader(void* arg,
 
   if (s.ok()) {
     BlockContents contents;
+    // 有cache读cache，无则读文件
     if (block_cache != nullptr) {
       char cache_key_buffer[16];
       EncodeFixed64(cache_key_buffer, table->rep_->cache_id);
@@ -200,6 +201,7 @@ Iterator* Table::BlockReader(void* arg,
 
   Iterator* iter;
   if (block != nullptr) {
+    // 被它注册的函数会在iter析构时被调用
     iter = block->NewIterator(table->rep_->options.comparator);
     if (cache_handle == nullptr) {
       iter->RegisterCleanup(&DeleteBlock, block, nullptr);
@@ -225,14 +227,17 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k,
   Iterator* iiter = rep_->index_block->NewIterator(rep_->options.comparator);
   iiter->Seek(k);
   if (iiter->Valid()) {
+    // 使用布隆过滤器加速判断是否存在
     Slice handle_value = iiter->value();
     FilterBlockReader* filter = rep_->filter;
     BlockHandle handle;
     if (filter != nullptr &&
         handle.DecodeFrom(&handle_value).ok() &&
         !filter->KeyMayMatch(handle.offset(), k)) {
+      // 没找到，则一定没找到
       // Not found
     } else {
+      // 找到，则是可能找到
       Iterator* block_iter = BlockReader(this, options, iiter->value());
       block_iter->Seek(k);
       if (block_iter->Valid()) {
@@ -255,6 +260,7 @@ uint64_t Table::ApproximateOffsetOf(const Slice& key) const {
       rep_->index_block->NewIterator(rep_->options.comparator);
   index_iter->Seek(key);
   uint64_t result;
+  // 没找到，则返回metaindex_handle的偏移
   if (index_iter->Valid()) {
     BlockHandle handle;
     Slice input = index_iter->value();

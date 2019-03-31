@@ -366,7 +366,7 @@ Status Version::Get(const ReadOptions& options,
         }
       }
       if (tmp.empty()) continue;
-
+      // 第0层进行排序，可能重叠
       std::sort(tmp.begin(), tmp.end(), NewestFirst);
       files = &tmp[0];
       num_files = tmp.size();
@@ -724,6 +724,7 @@ class VersionSet::Builder {
            added_iter != added->end();
            ++added_iter) {
         // Add all smaller files listed in base_
+        // 没问题，只会把base_中file加一次到v中，base_iter的变化
         for (std::vector<FileMetaData*>::const_iterator bpos
                  = std::upper_bound(base_iter, base_end, *added_iter, cmp);
              base_iter != bpos;
@@ -811,6 +812,7 @@ void VersionSet::AppendVersion(Version* v) {
   current_ = v;
   v->Ref();
 
+  // 双向链表，dummy_versions_ 相当于表头
   // Append to linked list
   v->prev_ = dummy_versions_.prev_;
   v->next_ = &dummy_versions_;
@@ -1274,6 +1276,7 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c) {
   for (int which = 0; which < 2; which++) {
     if (!c->inputs_[which].empty()) {
       if (c->level() + which == 0) {
+        // 0层 table cache迭代器
         const std::vector<FileMetaData*>& files = c->inputs_[which];
         for (size_t i = 0; i < files.size(); i++) {
           list[num++] = table_cache_->NewIterator(
@@ -1281,6 +1284,7 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c) {
         }
       } else {
         // Create concatenating iterator for the files from this level
+        // 其他level 双曾迭代器，第一层为文件
         list[num++] = NewTwoLevelIterator(
             new Version::LevelFileNumIterator(icmp_, &c->inputs_[which]),
             &GetFileIterator, table_cache_, options);
@@ -1288,6 +1292,7 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c) {
     }
   }
   assert(num <= space);
+  // 将各个文件的迭代器生成新的迭代器
   Iterator* result = NewMergingIterator(&icmp_, list, num);
   delete[] list;
   return result;
@@ -1366,6 +1371,7 @@ void VersionSet::SetupOtherInputs(Compaction* c) {
     const int64_t inputs0_size = TotalFileSize(c->inputs_[0]);
     const int64_t inputs1_size = TotalFileSize(c->inputs_[1]);
     const int64_t expanded0_size = TotalFileSize(expanded0);
+    // level 扩展后的文件大小大于扩展前的,且生成在level+1的文件大小不会超过设置的限定
     if (expanded0.size() > c->inputs_[0].size() &&
         inputs1_size + expanded0_size <
             ExpandedCompactionByteSizeLimit(options_)) {
@@ -1374,6 +1380,7 @@ void VersionSet::SetupOtherInputs(Compaction* c) {
       std::vector<FileMetaData*> expanded1;
       current_->GetOverlappingInputs(level+1, &new_start, &new_limit,
                                      &expanded1);
+      // 不会导致压缩后，level+1文件数目变多
       if (expanded1.size() == c->inputs_[1].size()) {
         Log(options_->info_log,
             "Expanding@%d %d+%d (%ld+%ld bytes) to %d+%d (%ld+%ld bytes)\n",
@@ -1395,6 +1402,7 @@ void VersionSet::SetupOtherInputs(Compaction* c) {
 
   // Compute the set of grandparent files that overlap this compaction
   // (parent == level+1; grandparent == level+2)
+  // 计算level+2的重叠文件数
   if (level + 2 < config::kNumLevels) {
     current_->GetOverlappingInputs(level + 2, &all_start, &all_limit,
                                    &c->grandparents_);
@@ -1404,6 +1412,8 @@ void VersionSet::SetupOtherInputs(Compaction* c) {
   // We update this immediately instead of waiting for the VersionEdit
   // to be applied so that if the compaction fails, we will try a different
   // key range next time.
+  // 立即更新这一层的compact点，而不是等到compaction完成，
+  // 这样如果这次压缩失败，下次能选择在不同的区间
   compact_pointer_[level] = largest.Encode().ToString();
   c->edit_.SetCompactPointer(level, largest);
 }
@@ -1423,6 +1433,7 @@ Compaction* VersionSet::CompactRange(
   // and we must not pick one file and drop another older file if the
   // two files overlap.
   if (level > 0) {
+    // 合并后的文件不能超过设置的限定大小
     const uint64_t limit = MaxFileSizeForLevel(options_, level);
     uint64_t total = 0;
     for (size_t i = 0; i < inputs.size(); i++) {
@@ -1466,6 +1477,7 @@ bool Compaction::IsTrivialMove() const {
   // Avoid a move if there is lots of overlapping grandparent data.
   // Otherwise, the move could create a parent file that will require
   // a very expensive merge later on.
+  // 避免之后merge需要较大的代价
   return (num_input_files(0) == 1 && num_input_files(1) == 0 &&
           TotalFileSize(grandparents_) <=
               MaxGrandParentOverlapBytes(vset->options_));

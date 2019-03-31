@@ -43,10 +43,10 @@ namespace {
 struct LRUHandle {
   void* value;
   void (*deleter)(const Slice&, void* value);
-  LRUHandle* next_hash;
-  LRUHandle* next;
-  LRUHandle* prev;
-  size_t charge;      // TODO(opt): Only allow uint32_t?
+  LRUHandle* next_hash; // 作为HashTable中的节点，指向hash值相同的节点（解决hash冲突采用链地址法）
+  LRUHandle* next;    // 作为LRUCache中的节点，指向后继
+  LRUHandle* prev;    // 作为LRUCache中的节点，指向前驱
+  size_t charge;      // TODO(opt): Only allow uint32_t? // 用户指定占用缓存的大小
   size_t key_length;
   bool in_cache;      // Whether entry is in the cache.
   uint32_t refs;      // References, including cache reference, if present.
@@ -135,6 +135,7 @@ class HandleTable {
         LRUHandle* next = h->next_hash;
         uint32_t hash = h->hash;
         LRUHandle** ptr = &new_list[hash & (new_length - 1)];
+        // 插入到链表的头部
         h->next_hash = *ptr;
         *ptr = h;
         h = next;
@@ -148,6 +149,7 @@ class HandleTable {
   }
 };
 
+// 利用哈希表实现O(1)的查询，利用链表维持对缓存记录按访问时间排序
 // A single shard of sharded cache.
 class LRUCache {
  public:
@@ -211,6 +213,8 @@ LRUCache::~LRUCache() {
     LRUHandle* next = e->next;
     assert(e->in_cache);
     e->in_cache = false;
+    // 如果不为1，说明LRUCache的使用者并未主动调用Release或Erase方法。
+    // 因为初始的引用计数为2，调用Release或Erase时，引用计数会减一
     assert(e->refs == 1);  // Invariant of lru_ list.
     Unref(e);
     e = next;
@@ -252,6 +256,8 @@ void LRUCache::LRU_Append(LRUHandle* list, LRUHandle* e) {
   e->next->prev = e;
 }
 
+// 根据LRUCache规则，被访问的结点要移动到双向链表的lru_结点之前
+// 移动只是改变了结点前驱指针和后继指针的指向，结点的存储位置并没变化
 Cache::Handle* LRUCache::Lookup(const Slice& key, uint32_t hash) {
   MutexLock l(&mutex_);
   LRUHandle* e = table_.Lookup(key, hash);
@@ -279,19 +285,29 @@ Cache::Handle* LRUCache::Insert(
   e->key_length = key.size();
   e->hash = hash;
   e->in_cache = false;
+  // 给外部调用Release或Erase时用
   e->refs = 1;  // for the returned handle.
   memcpy(e->key_data, key.data(), key.size());
 
   if (capacity_ > 0) {
+    // 给外部调用Release或Erase时用
     e->refs++;  // for the cache's reference.
     e->in_cache = true;
     LRU_Append(&in_use_, e);
     usage_ += charge;
+    // 当哈希表中已存在hash值相同的结点时，将原有的结点从双向链表中移除，
+    // 并释放该结点。
+    // 这里不需要调用哈希表的Remove方法将该结点从哈希表中移除，因为Insert
+    // 的时候实际上已经移除了
     FinishErase(table_.Insert(e));
   } else {  // don't cache. (capacity_==0 is supported and turns off caching.)
     // next is read by key() in an assert, so it must be initialized
     e->next = nullptr;
   }
+
+  // 如果已用容量超过了总容量且头结点lru_还有后继。
+  // 删除lru_的后继结点，根据LRUCache规则，这个结点最近用的最少。
+  // 该结点既要从哈希表中移除，也要从双向链表中移除，然后再释放。
   while (usage_ > capacity_ && lru_.next != &lru_) {
     LRUHandle* old = lru_.next;
     assert(old->refs == 1);
@@ -337,23 +353,32 @@ void LRUCache::Prune() {
 static const int kNumShardBits = 4;
 static const int kNumShards = 1 << kNumShardBits;
 
+//  这是因为levelDB是多线程的，每个线程访问缓冲区的时候都会将缓冲区锁住，
+//  为了多线程访问，尽可能快速，减少锁开销，ShardedLRUCache内部有16个LRUCache，
+//  查找Key时首先计算key属于哪一个分片，分片的计算方法是取32位hash值的高4位，
+//  然后在相应的LRUCache中进行查找，这样就大大减少了多线程的访问锁的开销
 class ShardedLRUCache : public Cache {
  private:
   LRUCache shard_[kNumShards];
   port::Mutex id_mutex_;
   uint64_t last_id_;
 
+  // 使用哈希函数求出哈希值
   static inline uint32_t HashSlice(const Slice& s) {
     return Hash(s.data(), s.size(), 0);
   }
 
+  // 取哈希值的高四位来定位使用那片LRUCache缓存
   static uint32_t Shard(uint32_t hash) {
     return hash >> (32 - kNumShardBits);
   }
 
  public:
+  // capacity是Cache大小，其单位可以自行指定（如table cache，一个sstable文件的索引信息是一个单位，
+  // 而block cache，一个byte是一个单位）
   explicit ShardedLRUCache(size_t capacity)
       : last_id_(0) {
+    // 向上取整
     const size_t per_shard = (capacity + (kNumShards - 1)) / kNumShards;
     for (int s = 0; s < kNumShards; s++) {
       shard_[s].SetCapacity(per_shard);

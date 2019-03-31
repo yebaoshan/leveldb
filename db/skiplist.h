@@ -182,6 +182,7 @@ struct SkipList<Key, Comparator>::Node {
 template<typename Key, class Comparator>
 typename SkipList<Key, Comparator>::Node*
 SkipList<Key, Comparator>::NewNode(const Key& key, int height) {
+  // 一次性分配Node和next_内存
   char* const node_memory = arena_->AllocateAligned(
       sizeof(Node) + sizeof(std::atomic<Node*>) * (height - 1));
   return new (node_memory) Node(key);
@@ -244,6 +245,9 @@ int SkipList<Key, Comparator>::RandomHeight() {
   // Increase height with probability 1 in kBranching
   static const unsigned int kBranching = 4;
   int height = 1;
+  // 从level1到level11则是按概率决定是否需要建索引，概率按照1/4的因子等比递减
+  // 建立x级索引的概率是0.25 ^(x - 1) * 0.75，
+  // 所以，建立1级索引的概率为75%，建立2级索引的概率为25%*75%=18.75%
   while (height < kMaxHeight && ((rnd_.Next() % kBranching) == 0)) {
     height++;
   }
@@ -341,6 +345,7 @@ void SkipList<Key, Comparator>::Insert(const Key& key) {
   Node* prev[kMaxHeight];
   Node* x = FindGreaterOrEqual(key, prev);
 
+  // 不允许重复的key插入
   // Our data structure does not allow duplicate insertion
   assert(x == nullptr || !Equal(key, x->key));
 

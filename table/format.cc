@@ -33,6 +33,7 @@ void Footer::EncodeTo(std::string* dst) const {
   const size_t original_size = dst->size();
   metaindex_handle_.EncodeTo(dst);
   index_handle_.EncodeTo(dst);
+  // 为保持对齐，4字段编码后不足40字节，则填充0到40字节
   dst->resize(2 * BlockHandle::kMaxEncodedLength);  // Padding
   PutFixed32(dst, static_cast<uint32_t>(kTableMagicNumber & 0xffffffffu));
   PutFixed32(dst, static_cast<uint32_t>(kTableMagicNumber >> 32));
@@ -99,6 +100,7 @@ Status ReadBlock(RandomAccessFile* file,
 
   switch (data[n]) {
     case kNoCompression:
+      // 不等于说明data使用的不是buf上分配的内存
       if (data != buf) {
         // File implementation gave us pointer to some other data.
         // Use it directly under the assumption that it will be live

@@ -58,6 +58,7 @@ static inline const char* DecodeEntry(const char* p, const char* limit,
   *shared = reinterpret_cast<const unsigned char*>(p)[0];
   *non_shared = reinterpret_cast<const unsigned char*>(p)[1];
   *value_length = reinterpret_cast<const unsigned char*>(p)[2];
+  // 加速优化
   if ((*shared | *non_shared | *value_length) < 128) {
     // Fast path: all three values are encoded in one byte each
     p += 3;
@@ -67,6 +68,7 @@ static inline const char* DecodeEntry(const char* p, const char* limit,
     if ((p = GetVarint32Ptr(p, limit, value_length)) == nullptr) return nullptr;
   }
 
+  // 已经容纳不下记录中的key_delta和value字段了
   if (static_cast<uint32_t>(limit - p) < (*non_shared + *value_length)) {
     return nullptr;
   }
@@ -77,11 +79,12 @@ class Block::Iter : public Iterator {
  private:
   const Comparator* const comparator_;
   const char* const data_;      // underlying block contents
+  // 重启点信息在block data中的偏移
   uint32_t const restarts_;     // Offset of restart array (list of fixed32)
   uint32_t const num_restarts_; // Number of uint32_t entries in restart array
 
   // current_ is offset in data_ of current entry.  >= restarts_ if !Valid
-  uint32_t current_;
+  uint32_t current_; // current_是当前记录在bock data中的偏移，如果current_>=restarts_，说明出错
   uint32_t restart_index_;  // Index of restart block in which current_ falls
   std::string key_;
   Slice value_;
@@ -92,6 +95,10 @@ class Block::Iter : public Iterator {
   }
 
   // Return the offset in data_ just past the end of the current entry.
+
+  // 因为value_是一条记录的最后一个字段，所以这里返回的是下一条记录的偏移量，也就是current_
+  // 但是如果在该函数之前调用了SeekToRestartPoint，此时的value_.data()=data_,value.size=0
+  // 这样的话即使是block data的第一条记录，也可以用使用该函数，此时返回的偏移量为0
   inline uint32_t NextEntryOffset() const {
     return (value_.data() + value_.size()) - data_;
   }
@@ -101,6 +108,9 @@ class Block::Iter : public Iterator {
     return DecodeFixed32(data_ + restarts_ + index * sizeof(uint32_t));
   }
 
+  // 该函数只是设置了几个有限的状态，其它值将在函数ParseNextKey()中设置。
+  // 需要注意的是，这里的value_并不是记录中的value字段，而只是一个指向记录起始位置的0长度指针，
+  // 这样后面的ParseNextKey函数将会解析出重启点的value字段，并赋值到value_中
   void SeekToRestartPoint(uint32_t index) {
     key_.clear();
     restart_index_ = index;
@@ -141,6 +151,12 @@ class Block::Iter : public Iterator {
     ParseNextKey();
   }
 
+  // 向前解析复杂一些，步骤如下
+  // 1.先向前查找当前记录之前的重启点
+  // 2.当循环到了第一个重启点，其偏移量（0）依然与当前记录的偏移量相等
+  //   说明当前记录就是第一条记录，此时初始化current_和restart_index_，并返回
+  // 3.调用SeekToRestartPoint定位到符合要求的启动点
+  // 4.向后循环解析，直到解析了原记录之前的一条记录，结束
   virtual void Prev() {
     assert(Valid());
 
@@ -162,6 +178,12 @@ class Block::Iter : public Iterator {
     } while (ParseNextKey() && NextEntryOffset() < original);
   }
 
+
+  // 从左到右（从前到后）查找第一条key大于target的记录
+  // 1.二分查找，找到key < target的最后一个重启点
+  // 2.定位到该重启点，其索引由left指定，这是前面二分查找到的结果。如前面所分析的，
+  //   value_指向重启点的地址，而size_指定为0，这样ParseNextKey函数将会解析出重启点key和value。
+  // 3.自重启点线性向下查找，直到遇到key>=target的记录或者直到最后一条记录，也不满足key>=target，返回
   virtual void Seek(const Slice& target) {
     // Binary search in restart array to find the last restart point
     // with a key < target
@@ -178,6 +200,9 @@ class Block::Iter : public Iterator {
         CorruptionError();
         return;
       }
+
+      //  ?? 仅比较non_shared部分
+      //  因为是key_ptr指向的是重启点
       Slice mid_key(key_ptr, non_shared);
       if (Compare(mid_key, target) < 0) {
         // Key at "mid" is smaller than "target".  Therefore all
@@ -209,6 +234,7 @@ class Block::Iter : public Iterator {
 
   virtual void SeekToLast() {
     SeekToRestartPoint(num_restarts_ - 1);
+    // 先定位到最后一个重启点
     while (ParseNextKey() && NextEntryOffset() < restarts_) {
       // Keep skipping
     }
@@ -225,7 +251,7 @@ class Block::Iter : public Iterator {
 
   bool ParseNextKey() {
     current_ = NextEntryOffset();
-    const char* p = data_ + current_;
+    const char* p = data_ + current_;  // 指向当前记录
     const char* limit = data_ + restarts_;  // Restarts come right after data
     if (p >= limit) {
       // No more entries to return.  Mark as invalid.
@@ -241,9 +267,12 @@ class Block::Iter : public Iterator {
       CorruptionError();
       return false;
     } else {
+      // 重启点第一个条记录shared为0,后续记录使用上一条记录key的shared部分
       key_.resize(shared);
       key_.append(p, non_shared);
       value_ = Slice(p + non_shared, value_length);
+      // ??? 为什么不是GetRestartPoint(restart_index_ + 1) <= current_)
+      // 应该都可以
       while (restart_index_ + 1 < num_restarts_ &&
              GetRestartPoint(restart_index_ + 1) < current_) {
         ++restart_index_;

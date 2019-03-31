@@ -79,6 +79,7 @@ Iterator* MemTable::NewIterator() {
   return new MemTableIterator(&table_);
 }
 
+// internal_key_size internal_key(key sequence << 8 | type) value_size value
 void MemTable::Add(SequenceNumber s, ValueType type,
                    const Slice& key,
                    const Slice& value) {

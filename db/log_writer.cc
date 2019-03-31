@@ -12,6 +12,7 @@
 namespace leveldb {
 namespace log {
 
+// 提前算好type的crc，加速
 static void InitTypeCrc(uint32_t* type_crc) {
   for (int i = 0; i <= kMaxRecordType; i++) {
     char t = static_cast<char>(i);
@@ -45,6 +46,7 @@ Status Writer::AddRecord(const Slice& slice) {
   do {
     const int leftover = kBlockSize - block_offset_;
     assert(leftover >= 0);
+    // 少有kHeaderSize 补充0
     if (leftover < kHeaderSize) {
       // Switch to a new block
       if (leftover > 0) {
@@ -52,6 +54,7 @@ Status Writer::AddRecord(const Slice& slice) {
         assert(kHeaderSize == 7);
         dest_->Append(Slice("\x00\x00\x00\x00\x00\x00", leftover));
       }
+      // 切换到一个新的Block
       block_offset_ = 0;
     }
 

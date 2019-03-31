@@ -73,6 +73,8 @@ void InternalKeyComparator::FindShortestSeparator(
   Slice user_limit = ExtractUserKey(limit);
   std::string tmp(user_start.data(), user_start.size());
   user_comparator_->FindShortestSeparator(&tmp, user_limit);
+  // ?? 物理上小，逻辑上大，说明start已经变化了; 如hellow 和 helloz之间，
+  // 实际返回的是hellox, size == 的时候??
   if (tmp.size() < user_start.size() &&
       user_comparator_->Compare(user_start, tmp) < 0) {
     // User key has become shorter physically, but larger logically.
@@ -122,6 +124,7 @@ LookupKey::LookupKey(const Slice& user_key, SequenceNumber s) {
   size_t usize = user_key.size();
   size_t needed = usize + 13;  // A conservative estimate
   char* dst;
+  // 短key 使用栈空间
   if (needed <= sizeof(space_)) {
     dst = space_;
   } else {

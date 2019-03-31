@@ -35,6 +35,7 @@ TableCache::TableCache(const std::string& dbname,
     : env_(options.env),
       dbname_(dbname),
       options_(options),
+      // 个数
       cache_(NewLRUCache(entries)) {
 }
 
@@ -50,6 +51,7 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
   Slice key(buf, sizeof(buf));
   *handle = cache_->Lookup(key);
   if (*handle == nullptr) {
+    // 可能为ldb或sst后缀，应该最新使用了ldb后缀
     std::string fname = TableFileName(dbname_, file_number);
     RandomAccessFile* file = nullptr;
     Table* table = nullptr;
@@ -70,6 +72,7 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
       // We do not cache error results so that if the error is transient,
       // or somebody repairs the file, we recover automatically.
     } else {
+      // 将tf插入到LRUCache中，占据一个大小的缓存，DeleteEntry是删除结点的回调函数
       TableAndFile* tf = new TableAndFile;
       tf->file = file;
       tf->table = table;
@@ -79,6 +82,10 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
   return s;
 }
 
+
+// 参数file_number是文件编号，file_size是文件大小
+// 参数*tableptr指向Table对象，当然必须先判断tableptr是不是NULL
+// 返回某个.sst文件对应的Table对象的迭代器
 Iterator* TableCache::NewIterator(const ReadOptions& options,
                                   uint64_t file_number,
                                   uint64_t file_size,
@@ -118,6 +125,7 @@ Status TableCache::Get(const ReadOptions& options,
   return s;
 }
 
+// Evict含义为”驱逐“，当Compaction时，过期的文件将会被移除，此时调用Evict从移除该文件缓存
 void TableCache::Evict(uint64_t file_number) {
   char buf[sizeof(file_number)];
   EncodeFixed64(buf, file_number);

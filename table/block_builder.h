@@ -21,10 +21,13 @@ class BlockBuilder {
   // Reset the contents as if the BlockBuilder was just constructed.
   void Reset();
 
+  // Add的调用应该在Reset之后，在Finish之前。
+  // Add只添加KV对（一条记录）,重启点信息部分由Finish添加
   // REQUIRES: Finish() has not been called since the last call to Reset().
   // REQUIRES: key is larger than any previously added key
   void Add(const Slice& key, const Slice& value);
 
+  // 组建block data完成，返回block data
   // Finish building the block and return a slice that refers to the
   // block contents.  The returned slice will remain valid for the
   // lifetime of this builder or until Reset() is called.

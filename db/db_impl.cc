@@ -112,6 +112,8 @@ Options SanitizeOptions(const std::string& dbname,
     }
   }
   if (result.block_cache == nullptr) {
+    // 如果用户没指定LRU缓冲，则创建8MB的LRU缓冲
+    // 字节大小
     result.block_cache = NewLRUCache(8 << 20);
   }
   return result;
@@ -129,18 +131,19 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       options_(SanitizeOptions(dbname, &internal_comparator_,
                                &internal_filter_policy_, raw_options)),
       owns_info_log_(options_.info_log != raw_options.info_log),
-      owns_cache_(options_.block_cache != raw_options.block_cache),
+      owns_cache_(options_.block_cache != raw_options.block_cache), // 是否拥有自己的LRU缓冲，或者使用用户提供的
       dbname_(dbname),
+      // 根据Option创建一个LRU的缓冲对象, LRU的Entry数目不能超过max_open_files-10
       table_cache_(new TableCache(dbname_, options_, TableCacheSize(options_))),
-      db_lock_(nullptr),
+      db_lock_(nullptr), // 不创建也不锁定文件锁
       shutting_down_(false),
-      background_work_finished_signal_(&mutex_),
+      background_work_finished_signal_(&mutex_), // 用于与后台线程交互的条件信号
       mem_(nullptr),
-      imm_(nullptr),
+      imm_(nullptr), // 用于双缓冲表
       has_imm_(false),
-      logfile_(nullptr),
-      logfile_number_(0),
-      log_(nullptr),
+      logfile_(nullptr), // log 文件
+      logfile_number_(0), // log 文件序号
+      log_(nullptr), // log writer
       seed_(0),
       tmp_batch_(new WriteBatch),
       background_compaction_scheduled_(false),
@@ -179,6 +182,7 @@ DBImpl::~DBImpl() {
 
 Status DBImpl::NewDB() {
   VersionEdit new_db;
+  // 设置Comparator
   new_db.SetComparatorName(user_comparator()->Name());
   new_db.SetLogNumber(0);
   new_db.SetNextFile(2);
@@ -306,6 +310,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool *save_manifest) {
     }
   }
 
+  // 如果运行到此，表明表已经存在，需要load，第一步是从MANIFEST文件中恢复VersionSet
   s = versions_->Recover(save_manifest);
   if (!s.ok()) {
     return s;
@@ -319,8 +324,13 @@ Status DBImpl::Recover(VersionEdit* edit, bool *save_manifest) {
   // Note that PrevLogNumber() is no longer used, but we pay
   // attention to it in case we are recovering a database
   // produced by an older version of leveldb.
+
+  // 获取MANIFEST中获取最后一次持久化清单时在使用LOG文件序号，注意：这个LOG当时正在使用，
+  // 表明数据还在memtable中，没有形成sst文件，所以数据恢复需要从这个LOG文件开始(包含这个LOG)。
+  // 另外，prev_log是早前版本level_db使用的机制，现在以及不再使用，这里只是为了兼容
   const uint64_t min_log = versions_->LogNumber();
   const uint64_t prev_log = versions_->PrevLogNumber();
+  // 扫描DB目录，记录下所有比MANIFEST中记录的LOG更加新的LOG文件
   std::vector<std::string> filenames;
   s = env_->GetChildren(dbname_, &filenames);
   if (!s.ok()) {
@@ -347,7 +357,10 @@ Status DBImpl::Recover(VersionEdit* edit, bool *save_manifest) {
 
   // Recover in the order in which the logs were generated
   std::sort(logs.begin(), logs.end());
+  // 逐个LOG文件回放
   for (size_t i = 0; i < logs.size(); i++) {
+    // 回放LOG时，记录被插入到memtable，如果超过write buffer，则还会dump出level 0的sst文件，
+    // 此方法会将日志中每条记录的sequence num与max_sequence进行比较，以记录下最大的sequence num
     s = RecoverLogFile(logs[i], (i == logs.size() - 1), save_manifest, edit,
                        &max_sequence);
     if (!s.ok()) {
@@ -357,9 +370,12 @@ Status DBImpl::Recover(VersionEdit* edit, bool *save_manifest) {
     // The previous incarnation may not have written any MANIFEST
     // records after allocating this log number.  So we manually
     // update the file number allocation counter in VersionSet.
+    // 更新最大的文件序号，因为MANIFEST文件中没有记录这些LOG文件占用的序号；
+    // 当然，也可能LOG的序号小于MANIFEST中记录的最大文件序号，这时不需要更新。
     versions_->MarkFileNumberUsed(logs[i]);
   }
 
+  // 比较日志回放前后的最大sequence num，如果回放记录中有超过LastSequence()的记录，则替换
   if (versions_->LastSequence() < max_sequence) {
     versions_->SetLastSequence(max_sequence);
   }
@@ -490,6 +506,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
   return status;
 }
 
+// 将memtab内容更新到磁盘
 Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
                                 Version* base) {
   mutex_.AssertHeld();
@@ -523,6 +540,7 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
     const Slice min_user_key = meta.smallest.user_key();
     const Slice max_user_key = meta.largest.user_key();
     if (base != nullptr) {
+      // 有可能不是更新到level0,而是没有重叠项的某个level
       level = base->PickLevelForMemTableOutput(min_user_key, max_user_key);
     }
     edit->AddFile(level, meta.number, meta.file_size,
@@ -662,6 +680,7 @@ void DBImpl::MaybeScheduleCompaction() {
              !versions_->NeedsCompaction()) {
     // No work to be done
   } else {
+    // 后台线程compact
     background_compaction_scheduled_ = true;
     env_->Schedule(&DBImpl::BGWork, this);
   }
@@ -922,6 +941,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   SequenceNumber last_sequence_for_key = kMaxSequenceNumber;
   for (; input->Valid() && !shutting_down_.load(std::memory_order_acquire); ) {
     // Prioritize immutable compaction work
+    // imm 合并
     if (has_imm_.load(std::memory_order_relaxed)) {
       const uint64_t imm_start = env_->NowMicros();
       mutex_.Lock();
@@ -965,6 +985,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
         drop = true;    // (A)
       } else if (ikey.type == kTypeDeletion &&
                  ikey.sequence <= compact->smallest_snapshot &&
+                 // level+2以上层都不存在此key
                  compact->compaction->IsBaseLevelForKey(ikey.user_key)) {
         // For this user key:
         // (1) there is no data in higher levels
@@ -1217,10 +1238,12 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* my_batch) {
   }
 
   // May temporarily unlock and wait.
+  // 可能阻塞
   Status status = MakeRoomForWrite(my_batch == nullptr);
   uint64_t last_sequence = versions_->LastSequence();
   Writer* last_writer = &w;
   if (status.ok() && my_batch != nullptr) {  // nullptr batch is for compactions
+    // 批量插入,只要第一条的seq准确，接下来的是递增
     WriteBatch* updates = BuildBatchGroup(&last_writer);
     WriteBatchInternal::SetSequence(updates, last_sequence + 1);
     last_sequence += WriteBatchInternal::Count(updates);
@@ -1240,6 +1263,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* my_batch) {
         }
       }
       if (status.ok()) {
+        // 会相应更新sequence
         status = WriteBatchInternal::InsertInto(updates, mem_);
       }
       mutex_.Lock();
@@ -1364,6 +1388,7 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       background_work_finished_signal_.Wait();
     } else {
       // Attempt to switch to a new memtable and trigger compaction of old
+      // 切换mm
       assert(versions_->PrevLogNumber() == 0);
       uint64_t new_log_number = versions_->NewFileNumber();
       WritableFile* lfile = nullptr;
@@ -1383,6 +1408,7 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       mem_ = new MemTable(internal_comparator_);
       mem_->Ref();
       force = false;   // Do not force another compaction if have room
+      // 触发compact
       MaybeScheduleCompaction();
     }
   }
@@ -1507,9 +1533,11 @@ Status DB::Open(const Options& options, const std::string& dbname,
   VersionEdit edit;
   // Recover handles create_if_missing, error_if_exists
   bool save_manifest = false;
+  // 如果存在表数据，则Load表数据，并对日志进行恢复，否则，创建新表
   Status s = impl->Recover(&edit, &save_manifest);
   if (s.ok() && impl->mem_ == nullptr) {
     // Create new log and a corresponding memtable.
+    // 从VersionEdit获取一个新的文件序号，所以如果是新建数据表，则第一个LOG的序号为2（1已经被MANIFEST占用)
     uint64_t new_log_number = impl->versions_->NewFileNumber();
     WritableFile* lfile;
     s = options.env->NewWritableFile(LogFileName(dbname, new_log_number),
@@ -1526,10 +1554,13 @@ Status DB::Open(const Options& options, const std::string& dbname,
   if (s.ok() && save_manifest) {
     edit.SetPrevLogNumber(0);  // No older logs needed after recovery.
     edit.SetLogNumber(impl->logfile_number_);
+     // 如果存在原来的log，则回放log
     s = impl->versions_->LogAndApply(&edit, &impl->mutex_);
   }
   if (s.ok()) {
+    // 删除废弃的文件（如果存在）
     impl->DeleteObsoleteFiles();
+    // 检查是否需要Compaction，如果需要，则让后台启动Compaction线程
     impl->MaybeScheduleCompaction();
   }
   impl->mutex_.Unlock();
